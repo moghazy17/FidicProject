@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx vite build)",
+      "Bash(cd:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run lint:*)"
+    ]
+  }
+}

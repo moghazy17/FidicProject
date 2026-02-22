@@ -33,7 +33,7 @@ export function AppRouter() {
             <Route path="regions" element={<RegionsProjects />} />
             <Route path="contracts" element={<ContractManagement />} />
             <Route path="obligations" element={<ObligationTracker />} />
-            <Route path="ai-assistant" element={<AIAssistant />} />
+            <Route path="ai-assistant" element={<AIAssistant onClose={() => window.history.back()} contextType="general" />} />
             <Route path="reports" element={<Reports />} />
             <Route path="settings" element={<Settings />} />
             <Route path="project/:projectId" element={<ProjectWorkspace />} />

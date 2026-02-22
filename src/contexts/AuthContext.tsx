@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { authService } from '../services';
 
 interface User {
     id: string;
@@ -37,75 +38,70 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     const [loading, setLoading] = useState(true);
     const navigate = useNavigate();
 
-    // Check for existing authentication on mount
+    // Validate existing token on mount
     useEffect(() => {
-        const storedAuth = localStorage.getItem('fidic_auth');
-        if (storedAuth) {
-            try {
-                const authData = JSON.parse(storedAuth);
-                setUser(authData.user);
-                setIsAuthenticated(true);
-            } catch (error) {
-                console.error('Failed to parse auth data:', error);
-                localStorage.removeItem('fidic_auth');
-            }
+        const token = localStorage.getItem('access_token');
+        if (token) {
+            authService
+                .getProfile()
+                .then((profile) => {
+                    setUser({
+                        id: String(profile.id),
+                        email: profile.email,
+                        name: profile.name,
+                        role: 'User',
+                    });
+                    setIsAuthenticated(true);
+                })
+                .catch(() => {
+                    // Token invalid or expired — interceptor may handle refresh
+                    localStorage.removeItem('access_token');
+                    localStorage.removeItem('refresh_token');
+                })
+                .finally(() => {
+                    setLoading(false);
+                });
+        } else {
+            setLoading(false);
         }
-        setLoading(false);
     }, []);
 
     const login = async (email: string, password: string): Promise<boolean> => {
         setLoading(true);
+        try {
+            const tokenData = await authService.login(email, password);
+            localStorage.setItem('access_token', tokenData.access_token);
+            localStorage.setItem('refresh_token', tokenData.refresh_token);
 
-        // Simulate API call delay
-        await new Promise(resolve => setTimeout(resolve, 1000));
-
-        // Mock authentication - replace with real API call
-        const validCredentials = [
-            { email: 'admin@fidic.com', password: 'admin123', name: 'Admin User', role: 'Admin' },
-            { email: 'user@fidic.com', password: 'user123', name: 'Regular User', role: 'User' },
-        ];
-
-        const matchedUser = validCredentials.find(
-            cred => cred.email === email && cred.password === password
-        );
-
-        if (matchedUser) {
+            const profile = await authService.getProfile();
             const userData: User = {
-                id: Math.random().toString(36).substr(2, 9),
-                email: matchedUser.email,
-                name: matchedUser.name,
-                role: matchedUser.role,
+                id: String(profile.id),
+                email: profile.email,
+                name: profile.name,
+                role: 'User',
             };
 
             setUser(userData);
             setIsAuthenticated(true);
-
-            // Store authentication in localStorage
-            localStorage.setItem('fidic_auth', JSON.stringify({ user: userData }));
-
             setLoading(false);
             return true;
+        } catch {
+            setLoading(false);
+            return false;
         }
-
-        setLoading(false);
-        return false;
     };
 
     const logout = () => {
         setUser(null);
         setIsAuthenticated(false);
-        localStorage.removeItem('fidic_auth');
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('refresh_token');
         navigate('/signin');
     };
 
     const updateProfile = (updates: Partial<User>) => {
         if (!user) return;
-
-        const updatedUser = { ...user, ...updates };
-        setUser(updatedUser);
-
-        // Update localStorage
-        localStorage.setItem('fidic_auth', JSON.stringify({ user: updatedUser }));
+        setUser({ ...user, ...updates });
     };
 
     return (

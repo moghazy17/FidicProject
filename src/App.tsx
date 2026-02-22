@@ -1,18 +1,19 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { Sidebar } from './components/layout/Sidebar';
 import { Header } from './components/layout/Header';
 import { Footer } from './components/layout/Footer';
 import { GlobalChatbot } from './components/ui/GlobalChatbot';
-import { AIAssistant } from './components/ai/AIAssistant';
-import { AIAssistantProvider, useAIAssistant } from './context/AIAssistantContext';
+import { AIAssistantProvider } from './context/AIAssistantContext';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { TemplateProvider } from './context/TemplateContext';
+import { ToastProvider } from './context/ToastContext';
+import { UploadProgressProvider } from './context/UploadProgressContext';
+
 function AppContent() {
   const [language, setLanguage] = useState('english');
   const [direction, setDirection] = useState<'ltr' | 'rtl'>('ltr');
   const location = useLocation();
-  const { isAIAssistantOpen, toggleAIAssistant } = useAIAssistant();
   const { theme } = useTheme();
 
   const handleLanguageChange = (lang: string) => {
@@ -33,7 +34,6 @@ function AppContent() {
           </main>
           <Footer language={language} />
         </div>
-        {isAIAssistantOpen && <AIAssistant onClose={toggleAIAssistant} isRTL={direction === 'rtl'} />}
       </div>
       <GlobalChatbot language={language} />
     </div>
@@ -43,11 +43,15 @@ function AppContent() {
 export function App() {
   return (
     <ThemeProvider>
-      <AIAssistantProvider>
-        <TemplateProvider>
-          <AppContent />
-        </TemplateProvider>
-      </AIAssistantProvider>
+      <ToastProvider>
+        <AIAssistantProvider>
+          <TemplateProvider>
+            <UploadProgressProvider>
+              <AppContent />
+            </UploadProgressProvider>
+          </TemplateProvider>
+        </AIAssistantProvider>
+      </ToastProvider>
     </ThemeProvider>
   );
 }

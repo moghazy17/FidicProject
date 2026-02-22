@@ -1,322 +1,466 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { MessageSquareTextIcon, XIcon, SendIcon, MinimizeIcon, MaximizeIcon, FileTextIcon, BrainIcon, SettingsIcon, ChevronDownIcon } from 'lucide-react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import {
+  MessageSquareTextIcon, XIcon, SendIcon, MinimizeIcon, MaximizeIcon,
+  BrainIcon, ChevronDownIcon, ChevronRightIcon, WrenchIcon,
+  RefreshCwIcon, CopyIcon,
+} from 'lucide-react';
+import { conversationService } from '../../services';
+import { useAIAssistant } from '../../context/AIAssistantContext';
+import { useToast } from '../../context/ToastContext';
+import type { ToolCall } from '../../types';
+
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  toolCalls?: ToolCall[] | null;
+}
+
+const getSuggestedPrompts = (contextType: string): string[] => {
+  switch (contextType) {
+    case 'template':
+      return [
+        'Summarize this template clause',
+        'What risks does this clause carry?',
+        'Suggest improvements for clarity',
+        'Compare with standard FIDIC wording',
+      ];
+    case 'contract':
+      return [
+        'Analyze deviations from template',
+        'What are the key risk areas?',
+        'Summarize uploaded contract',
+        'Identify missing clauses',
+      ];
+    case 'comparison':
+      return [
+        'Explain the key differences',
+        'Which contractor has lowest risk?',
+        'Summarize risk assessment',
+        'Recommend negotiation points',
+      ];
+    default:
+      return [
+        'How does the approval process work?',
+        'What FIDIC books are available?',
+        'Help me understand clause 8.4',
+        'What are common contract risks?',
+      ];
+  }
+};
+
 interface GlobalChatbotProps {
   language?: string;
-  projectContext?: {
-    projectId?: string;
-    projectName?: string;
-    contractId?: string;
-    contractName?: string;
-  };
 }
-export function GlobalChatbot({
-  language = 'english',
-  projectContext
-}: GlobalChatbotProps) {
-  // Local open state for the floating mini-chat, independent from the full-screen assistant
-  const [isOpen, setIsOpen] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [isMinimized, setIsMinimized] = useState(false);
-  const [messages, setMessages] = useState([{
-    role: 'system',
-    content: language === 'arabic' ? 'مرحبًا! أنا مساعد فيديك الذكي. كيف يمكنني مساعدتك اليوم؟' : "Hello! I'm your FIDIC AI Assistant. How can I help you today?"
-  }]);
-  const [inputValue, setInputValue] = useState('');
-  const [contextDropdownOpen, setContextDropdownOpen] = useState(false);
-  const [selectedContext, setSelectedContext] = useState<string>(projectContext?.projectName ? `${projectContext.projectName}${projectContext.contractName ? ` - ${projectContext.contractName}` : ''}` : 'General');
-  const [creations, setCreations] = useState<Array<{ id: string; type: 'email' | 'document' | 'note'; title: string; content: string }>>([]);
+
+export function GlobalChatbot({ language = 'english' }: GlobalChatbotProps) {
   const isRTL = language === 'arabic';
+  const { isAIAssistantOpen, toggleAIAssistant, aiContext } = useAIAssistant();
+  const { showToast } = useToast();
+
+  const [isOpen, setIsOpen] = useState(false);
+  const [isMinimized, setIsMinimized] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [inputValue, setInputValue] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [isMultiContract, setIsMultiContract] = useState(false);
+
+  // Context override: user can switch to "General"
+  const [contextOverride, setContextOverride] = useState<'auto' | 'general'>('auto');
+  const [contextDropdownOpen, setContextDropdownOpen] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  // Available contexts
-  const availableContexts = [{
-    id: 'general',
-    name: isRTL ? 'عام' : 'General'
-  }, {
-    id: 'fidic-red-book',
-    name: isRTL ? 'فيديك الكتاب الأحمر 2017' : 'FIDIC Red Book 2017'
-  }, {
-    id: 'cairo-metro',
-    name: isRTL ? 'مترو القاهرة - الخط الثالث' : 'Cairo Metro Line 3'
-  }, {
-    id: 'abb-contract',
-    name: isRTL ? 'عقد ABB' : 'ABB Contract'
-  }, {
-    id: 'siemens-contract',
-    name: isRTL ? 'عقد سيمنز' : 'Siemens Contract'
-  }];
-  // Scroll to bottom of messages when new message is added
+  const contextKeyRef = useRef('');
+
+  // Determine effective context
+  const effectiveContextType = contextOverride === 'general' ? 'general' : aiContext.contextType;
+  const effectiveLabel = contextOverride === 'general' ? 'General' : aiContext.contextLabel;
+
+  // Build a key that changes when we need to reset conversation
+  const contextKey = contextOverride === 'general'
+    ? 'general'
+    : `${aiContext.contextType}|${aiContext.templateId ?? ''}|${aiContext.contractId ?? ''}|${(aiContext.multiContractIds ?? []).join(',')}`;
+
+  // Reset conversation when context key changes (but NOT when clauseCode changes)
+  useEffect(() => {
+    if (contextKeyRef.current && contextKeyRef.current !== contextKey) {
+      setConversationId(null);
+      setIsMultiContract(false);
+      setMessages([]);
+    }
+    contextKeyRef.current = contextKey;
+  }, [contextKey]);
+
+  // Sync with sidebar AI button
+  useEffect(() => {
+    if (isAIAssistantOpen && !isOpen) {
+      setIsOpen(true);
+      setIsMinimized(false);
+    }
+  }, [isAIAssistantOpen, isOpen]);
+
+  // Close sync: when user closes chatbot, also close the sidebar state
+  const handleClose = useCallback(() => {
+    setIsOpen(false);
+    if (isAIAssistantOpen) toggleAIAssistant();
+  }, [isAIAssistantOpen, toggleAIAssistant]);
+
+  // Scroll to bottom
   useEffect(() => {
     if (messagesEndRef.current && isOpen && !isMinimized) {
-      messagesEndRef.current.scrollIntoView({
-        behavior: 'smooth'
-      });
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, isOpen, isMinimized]);
+  }, [messages, isTyping, isOpen, isMinimized]);
 
-  const toggleMinimize = () => {
-    setIsMinimized(!isMinimized);
-  };
-  const handleSaveToCreations = (title: string, content: string, type: 'email' | 'document' | 'note' = 'note') => {
-    const id = `${Date.now()}`;
-    setCreations(prev => [{ id, type, title, content }, ...prev]);
-  };
-  const handleSendMessage = () => {
-    if (inputValue.trim() === '') return;
-    // Add user message
-    setMessages([...messages, {
-      role: 'user',
-      content: inputValue
-    }]);
-    setInputValue('');
-    // Simulate AI response
-    setTimeout(() => {
-      let aiResponse = '';
-      // Generate different responses based on context
-      if (selectedContext.includes('ABB Contract') || selectedContext.includes('عقد ABB')) {
-        aiResponse = isRTL ? 'أنا أحلل سؤالك حول عقد ABB. بناءً على شروط العقد، البند 14.7 يحدد شروط الدفع التي تتطلب معالجة المدفوعات خلال 90 يومًا. هذا يختلف عن معيار فيديك البالغ 56 يومًا ويشكل خطرًا متوسطًا على التدفق النقدي للمشروع.' : "I'm analyzing your question about the ABB Contract. Based on the contract terms, Clause 14.7 specifies payment terms requiring payments to be processed within 90 days. This differs from the FIDIC standard of 56 days and presents a medium risk to the project's cash flow.";
-      } else if (selectedContext.includes('Cairo Metro') || selectedContext.includes('مترو القاهرة')) {
-        aiResponse = isRTL ? 'بالنسبة لمشروع مترو القاهرة - الخط الثالث، يتضمن المشروع ثلاثة عقود رئيسية: عقد سيمنز للأنظمة الكهربائية، وعقد ABB للمعدات الكهربائية، وعقد أوراسكوم للأعمال المدنية. هل تريد معلومات محددة عن أي من هذه العقود؟' : 'For the Cairo Metro Line 3 project, the project includes three main contracts: Siemens Contract for electrical systems, ABB Contract for electrical equipment, and Orascom Contract for civil works. Would you like specific information about any of these contracts?';
-      } else {
-        aiResponse = isRTL ? 'أنا أحلل سؤالك حول عقود فيديك. هذه ستكون إجابة مفصلة حول بنود العقد والالتزامات وأفضل الممارسات بناءً على سؤالك المحدد.' : "I'm analyzing your question about FIDIC contracts. This would be a detailed response about contract clauses, obligations, and best practices based on your specific question.";
+  const ensureConversation = async (): Promise<string> => {
+    if (conversationId) return conversationId;
+
+    try {
+      if (
+        contextOverride !== 'general' &&
+        aiContext.multiContractIds &&
+        aiContext.multiContractIds.length >= 2
+      ) {
+        const session = await conversationService.createMultiContractSession(
+          aiContext.multiContractIds,
+          aiContext.templateId
+        );
+        setConversationId(session.conversation_id);
+        setIsMultiContract(true);
+        return session.conversation_id;
       }
-      setMessages(prev => [...prev, {
-        role: 'system',
-        content: aiResponse
-      }]);
-    }, 1000);
+
+      const conv = await conversationService.createConversation(
+        effectiveContextType,
+        contextOverride !== 'general' ? aiContext.contractId : undefined,
+        contextOverride !== 'general' ? aiContext.templateId : undefined,
+      );
+      setConversationId(conv.conversation_id);
+      setIsMultiContract(false);
+      return conv.conversation_id;
+    } catch (err) {
+      showToast('Failed to start conversation', 'error');
+      throw err;
+    }
   };
+
+  const handleSendMessage = async () => {
+    const query = inputValue.trim();
+    if (query === '' || isTyping) return;
+
+    setMessages((prev) => [...prev, { role: 'user', content: query }]);
+    setInputValue('');
+    setIsTyping(true);
+
+    try {
+      const convId = await ensureConversation();
+      const clauseCode = contextOverride !== 'general' ? aiContext.clauseCode : undefined;
+
+      const response = isMultiContract
+        ? await conversationService.sendMultiContractMessage(convId, query, clauseCode)
+        : await conversationService.sendMessage(convId, query, clauseCode);
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: response.assistant_message.content,
+          toolCalls: response.assistant_message.tool_calls,
+        },
+      ]);
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: 'Sorry, I encountered an error. Please try again.',
+        },
+      ]);
+      showToast('Failed to send message', 'error');
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSendMessage();
     }
   };
-  const handleContextSelect = (contextName: string) => {
-    setSelectedContext(contextName);
-    setContextDropdownOpen(false);
+
+  const handleClearConversation = () => {
+    setConversationId(null);
+    setIsMultiContract(false);
+    setMessages([]);
   };
-  return <>
-      {/* Chatbot button */}
-      <button onClick={() => setIsOpen(prev => !prev)} className="fixed bottom-6 right-6 bg-blue-600 text-white p-3 rounded-full shadow-lg hover:bg-blue-700 transition-all z-50" aria-label={isRTL ? 'فتح المساعد الذكي' : 'Open AI Assistant'}>
+
+  const handleCopy = (content: string) => {
+    navigator.clipboard.writeText(content);
+    showToast('Copied to clipboard', 'success');
+  };
+
+  const handleContextSelect = (mode: 'auto' | 'general') => {
+    setContextOverride(mode);
+    setContextDropdownOpen(false);
+    // Reset conversation when user switches context mode
+    setConversationId(null);
+    setIsMultiContract(false);
+    setMessages([]);
+  };
+
+  const suggestedPrompts = getSuggestedPrompts(effectiveContextType);
+  const showSuggestions = messages.length === 0;
+
+  return (
+    <>
+      {/* Floating toggle button */}
+      <button
+        onClick={() => {
+          if (isOpen) {
+            handleClose();
+          } else {
+            setIsOpen(true);
+            setIsMinimized(false);
+          }
+        }}
+        className="fixed bottom-6 right-6 bg-blue-600 dark:bg-blue-500 text-white p-3 rounded-full shadow-lg hover:bg-blue-700 dark:hover:bg-blue-600 transition-all z-50"
+        aria-label={isRTL ? 'فتح المساعد الذكي' : 'Open AI Assistant'}
+      >
         {isOpen ? <XIcon size={24} /> : <MessageSquareTextIcon size={24} />}
       </button>
-      {/* Workspace */}
-      {isOpen && (isFullscreen ? (
-        <div className={`fixed inset-0 bg-white shadow-2xl border border-gray-200 z-50 flex flex-col ${isRTL ? 'direction-rtl' : ''}`}>
-          {/* Top bar */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-blue-600 text-white">
+
+      {/* Chat panel */}
+      {isOpen && (
+        <div
+          className={`fixed bottom-20 right-6 bg-gray-900 rounded-lg shadow-xl border border-gray-700 transition-all z-50 ${
+            isMinimized ? 'w-72 h-14' : 'w-96 h-[600px] max-h-[80vh]'
+          } flex flex-col`}
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between p-3 border-b border-gray-700 bg-blue-600 text-white rounded-t-lg">
             <div className="flex items-center">
               <BrainIcon size={20} className="mr-2" />
-              <h3 className="font-medium">{isRTL ? 'مساحة عمل الذكاء الاصطناعي' : 'AI Workspace'}</h3>
+              <h3 className="font-medium text-sm">{isRTL ? 'المساعد الذكي' : 'AI Assistant'}</h3>
             </div>
             <div className="flex items-center space-x-2">
-              <button onClick={() => setIsFullscreen(false)} className="text-white hover:text-blue-100">
-                <MinimizeIcon size={18} />
+              <button
+                onClick={() => setIsMinimized(!isMinimized)}
+                className="text-white hover:text-blue-100"
+              >
+                {isMinimized ? <MaximizeIcon size={18} /> : <MinimizeIcon size={18} />}
               </button>
-              <button onClick={() => setIsOpen(false)} className="text-white hover:text-blue-100">
+              <button onClick={handleClose} className="text-white hover:text-blue-100">
                 <XIcon size={18} />
               </button>
             </div>
           </div>
-          {/* Three-panel layout */}
-          <div className="flex-1 flex overflow-hidden">
-            {/* Creations sidebar */}
-            <aside className="w-64 border-r border-gray-200 overflow-y-auto">
-              <div className="p-3 border-b border-gray-100">
-                <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{isRTL ? 'المخرجات' : 'Creations'}</h4>
-              </div>
-              <div className="p-3 space-y-2">
-                {creations.length === 0 ? (
-                  <p className="text-xs text-gray-500">{isRTL ? 'لا توجد مخرجات حتى الآن. احفظ الردود هنا.' : 'No creations yet. Save AI outputs here.'}</p>
-                ) : (
-                  creations.map(c => (
-                    <div key={c.id} className="border border-gray-200 rounded-md p-2 hover:bg-gray-50 cursor-pointer">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-medium text-gray-800">{c.title}</span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 capitalize">{c.type}</span>
-                      </div>
-                      <p className="mt-1 text-[11px] text-gray-600 line-clamp-2">{c.content}</p>
+
+          {!isMinimized && (
+            <>
+              {/* Context selector */}
+              <div className="px-3 py-2 border-b border-gray-700 bg-gray-800">
+                <div className="relative">
+                  <button
+                    onClick={() => setContextDropdownOpen(!contextDropdownOpen)}
+                    className="w-full flex items-center justify-between px-3 py-1.5 text-sm bg-gray-700 border border-gray-600 rounded-md hover:bg-gray-600"
+                  >
+                    <div className="flex items-center">
+                      <BrainIcon size={14} className="text-blue-400 mr-2" />
+                      <span className="text-gray-100 truncate">
+                        {effectiveLabel}
+                      </span>
                     </div>
-                  ))
-                )}
-              </div>
-            </aside>
-            {/* Context viewer */}
-            <section className="flex-1 overflow-y-auto border-r border-gray-200">
-              <div className="px-4 py-3 border-b border-gray-100 bg-gray-50">
-                <div className="max-w-lg">
-                  <div className="relative">
-                    <button onClick={() => setContextDropdownOpen(!contextDropdownOpen)} className="w-full flex items-center justify-between px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50">
-                      <div className="flex items-center">
-                        <FileTextIcon size={14} className="text-blue-600 mr-2" />
-                        <span className="text-gray-700">{selectedContext}</span>
-                      </div>
-                      <ChevronDownIcon size={16} className="text-gray-500" />
-                    </button>
-                    {contextDropdownOpen && <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-md shadow-md z-10">
-                        <ul className="py-1">
-                          {availableContexts.map(context => <li key={context.id}>
-                              <button onClick={() => handleContextSelect(context.name)} className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${selectedContext === context.name ? 'bg-blue-50 text-blue-600' : 'text-gray-700'}`}>
-                                {context.name}
-                              </button>
-                            </li>)}
-                        </ul>
-                      </div>}
-                  </div>
-                </div>
-              </div>
-              <div className="p-4 space-y-3">
-                <h4 className="text-sm font-medium text-gray-800">{isRTL ? 'مرجع السياق' : 'Context Reference'}</h4>
-                <div className="bg-white border border-gray-200 rounded-md p-3 text-xs text-gray-700 whitespace-pre-wrap">
-                  {selectedContext.includes('FIDIC') || selectedContext.includes('فيديك') ? (
-                    <>
-                      <p>{isRTL ? 'مقتطف من فيديك الكتاب الأحمر 2017 - البند 14.7 (الدفع):' : 'Excerpt from FIDIC Red Book 2017 - Clause 14.7 (Payment):'}</p>
-                      <p className="mt-2">{isRTL ? 'يجب على صاحب العمل أن يدفع إلى المقاول المبلغ المعتمد خلال 56 يومًا...' : 'The Employer shall pay to the Contractor the amount certified within 56 days...'}</p>
-                    </>
-                  ) : (
-                    <p>{isRTL ? 'سيظهر هنا محتوى السياق المختار (عقد/مشروع).' : 'Content for the selected context (contract/project) will appear here.'}</p>
+                    <ChevronDownIcon size={16} className="text-gray-300" />
+                  </button>
+                  {contextDropdownOpen && (
+                    <div className="absolute top-full left-0 right-0 mt-1 bg-gray-800 border border-gray-600 rounded-md shadow-md z-10">
+                      <ul className="py-1">
+                        {/* Auto-detected context */}
+                        {aiContext.contextType !== 'general' && (
+                          <li>
+                            <button
+                              onClick={() => handleContextSelect('auto')}
+                              className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-700 ${
+                                contextOverride === 'auto'
+                                  ? 'bg-blue-900/30 text-blue-400'
+                                  : 'text-gray-200'
+                              }`}
+                            >
+                              {aiContext.contextLabel}
+                              <span className="ml-1 text-xs text-gray-400">(auto)</span>
+                            </button>
+                          </li>
+                        )}
+                        {/* General override */}
+                        <li>
+                          <button
+                            onClick={() => handleContextSelect('general')}
+                            className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-700 ${
+                              contextOverride === 'general' || aiContext.contextType === 'general'
+                                ? 'bg-blue-900/30 text-blue-400'
+                                : 'text-gray-200'
+                            }`}
+                          >
+                            {isRTL ? 'عام' : 'General'}
+                          </button>
+                        </li>
+                      </ul>
+                    </div>
                   )}
                 </div>
               </div>
-            </section>
-            {/* Chat panel */}
-            <section className="w-[36%] min-w-[380px] max-w-[640px] flex flex-col">
-              <div className="px-4 py-3 border-b border-gray-200 bg-white flex items-center justify-between">
-                <h4 className="text-sm font-medium text-gray-800">{isRTL ? 'الدردشة' : 'Chat'}</h4>
-                <div className="flex items-center space-x-2">
-                  <button onClick={() => setIsFullscreen(false)} className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50">{isRTL ? 'تصغير' : 'Compact'}</button>
-                </div>
-              </div>
-              <div className="flex-1 overflow-y-auto p-3 bg-gray-50">
-                {messages.map((message, index) => <div key={index} className={`mb-3 ${message.role === 'user' ? 'flex justify-end' : 'flex justify-start'}`}>
-                    <div className={`max-w-[80%] rounded-lg p-3 ${message.role === 'user' ? 'bg-blue-600 text-white' : 'bg-white border border-gray-200 shadow-sm'}`}>
-                      <p className="text-sm whitespace-pre-line">
-                        {message.content}
-                      </p>
-                      {message.role === 'system' && <div className="mt-2 pt-2 border-t border-gray-100 flex justify-between items-center">
-                          <div className="flex space-x-2">
-                            <button className="text-xs text-gray-500 hover:text-blue-600" onClick={() => navigator.clipboard.writeText(message.content)}>
-                              {isRTL ? 'نسخ' : 'Copy'}
-                            </button>
-                            <button className="text-xs text-gray-500 hover:text-blue-600" onClick={() => handleSaveToCreations(isRTL ? 'ملاحظة' : 'Note', message.content, 'note')}>
-                              {isRTL ? 'حفظ كملاحظة' : 'Save as Note'}
-                            </button>
-                            <button className="text-xs text-gray-500 hover:text-blue-600" onClick={() => handleSaveToCreations(isRTL ? 'مسودة بريد' : 'Email Draft', `Subject: ${isRTL ? 'استفسار' : 'Inquiry'}\n\n${message.content}`, 'email')}>
-                              {isRTL ? 'تحويل لبريد' : 'Make Email'}
-                            </button>
-                            <button className="text-xs text-gray-500 hover:text-blue-600" onClick={() => handleSaveToCreations(isRTL ? 'وثيقة' : 'Document', message.content, 'document')}>
-                              {isRTL ? 'تحويل لوثيقة' : 'Make Document'}
-                            </button>
-                          </div>
-                          <div className="text-xs text-gray-400">FIDIC AI</div>
-                        </div>}
-                    </div>
-                  </div>)}
-                <div ref={messagesEndRef} />
-              </div>
-              <div className="p-3 border-t border-gray-200 bg-white">
-                <div className="relative">
-                  <textarea value={inputValue} onChange={e => setInputValue(e.target.value)} onKeyPress={handleKeyPress} placeholder={isRTL ? 'اكتب سؤالك هنا...' : 'Type your question here...'} className="w-full pl-3 pr-10 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none" rows={2} />
-                  <button onClick={handleSendMessage} disabled={inputValue.trim() === ''} className={`absolute right-2 bottom-2 text-blue-600 hover:text-blue-800 ${inputValue.trim() === '' ? 'opacity-50 cursor-not-allowed' : ''}`}>
-                    <SendIcon size={20} />
-                  </button>
-                </div>
-                <div className="flex justify-between mt-2 text-xs text-gray-500">
-                  <span>{isRTL ? 'اسأل عن العقود والبنود والالتزامات' : 'Ask about contracts, clauses, and obligations'}</span>
-                  <button className="text-blue-600 hover:text-blue-800">
-                    <SettingsIcon size={14} className="inline mr-1" />
-                    {isRTL ? 'إعدادات' : 'Settings'}
-                  </button>
-                </div>
-              </div>
-            </section>
-          </div>
-        </div>
-      ) : (
-        // Compact mini-chat
-        <div className={`fixed bottom-20 right-6 bg-white rounded-lg shadow-xl border border-gray-200 transition-all z-50 ${isMinimized ? 'w-72 h-14' : 'w-96 h-[600px] max-h-[80vh]'} flex flex-col`}>
-          {/* Header */}
-          <div className="flex items-center justify-between p-3 border-b border-gray-200 bg-blue-600 text-white rounded-t-lg">
-            <div className="flex items-center">
-              <BrainIcon size={20} className="mr-2" />
-              <h3 className="font-medium">{isRTL ? 'المساعد الذكي' : 'AI Assistant'}</h3>
-            </div>
-            <div className="flex items-center space-x-2">
-              <button onClick={() => setIsFullscreen(true)} className="text-white hover:text-blue-100">
-                <MaximizeIcon size={18} />
-              </button>
-              <button onClick={toggleMinimize} className="text-white hover:text-blue-100">
-                {isMinimized ? <MaximizeIcon size={18} /> : <MinimizeIcon size={18} />}
-              </button>
-              <button onClick={() => setIsOpen(false)} className="text-white hover:text-blue-100">
-                <XIcon size={18} />
-              </button>
-            </div>
-          </div>
-          {!isMinimized && <>
-              {/* Context selector */}
-              <div className="px-3 py-2 border-b border-gray-200 bg-gray-50">
-                <div className="relative">
-                  <button onClick={() => setContextDropdownOpen(!contextDropdownOpen)} className="w-full flex items-center justify-between px-3 py-1.5 text-sm bg-white border border-gray-300 rounded-md hover:bg-gray-50">
-                    <div className="flex items-center">
-                      <FileTextIcon size={14} className="text-blue-600 mr-2" />
-                      <span className="text-gray-700">{selectedContext}</span>
-                    </div>
-                    <ChevronDownIcon size={16} className="text-gray-500" />
-                  </button>
-                  {contextDropdownOpen && <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-md shadow-md z-10">
-                      <ul className="py-1">
-                        {availableContexts.map(context => <li key={context.id}>
-                            <button onClick={() => handleContextSelect(context.name)} className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${selectedContext === context.name ? 'bg-blue-50 text-blue-600' : 'text-gray-700'}`}>
-                              {context.name}
-                            </button>
-                          </li>)}
-                      </ul>
-                    </div>}
-                </div>
-              </div>
+
               {/* Messages */}
-              <div className="flex-1 overflow-y-auto p-3 bg-gray-50">
-                {messages.map((message, index) => <div key={index} className={`mb-3 ${message.role === 'user' ? 'flex justify-end' : 'flex justify-start'}`}>
-                    <div className={`max-w-[80%] rounded-lg p-3 ${message.role === 'user' ? 'bg-blue-600 text-white' : 'bg-white border border-gray-200 shadow-sm'}`}>
-                      <p className="text-sm whitespace-pre-line">
+              <div className="flex-1 overflow-y-auto p-3 bg-gray-900">
+                {/* Welcome + suggested prompts when empty */}
+                {showSuggestions && (
+                  <div className="text-center py-6">
+                    <BrainIcon size={32} className="mx-auto mb-3 text-blue-400 opacity-60" />
+                    <p className="text-sm text-gray-300 mb-4">
+                      {isRTL
+                        ? 'مرحبًا! كيف يمكنني مساعدتك اليوم؟'
+                        : "Hello! How can I help you today?"}
+                    </p>
+                    <div className="flex flex-wrap gap-2 justify-center">
+                      {suggestedPrompts.map((prompt, i) => (
+                        <button
+                          key={i}
+                          onClick={() => setInputValue(prompt)}
+                          className="px-3 py-1.5 text-xs bg-gray-800 text-gray-200 border border-gray-600 rounded-full hover:bg-gray-700 hover:border-blue-500 transition-colors"
+                        >
+                          {prompt}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Chat messages */}
+                {messages.map((message, index) => (
+                  <div
+                    key={index}
+                    className={`mb-3 ${message.role === 'user' ? 'flex justify-end' : 'flex justify-start'}`}
+                  >
+                    <div
+                      className={`max-w-[85%] rounded-lg p-3 ${
+                        message.role === 'user'
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-gray-800 border border-gray-700 shadow-sm'
+                      }`}
+                    >
+                      <p className="text-sm whitespace-pre-line text-gray-100">
                         {message.content}
                       </p>
-                      {message.role === 'system' && <div className="mt-2 pt-2 border-t border-gray-100 flex justify-between items-center">
-                          <div className="flex space-x-2">
-                            <button className="text-xs text-gray-500 hover:text-blue-600" onClick={() => navigator.clipboard.writeText(message.content)}>
-                              {isRTL ? 'نسخ' : 'Copy'}
-                            </button>
-                            <button className="text-xs text-gray-500 hover:text-blue-600" onClick={() => handleSaveToCreations(isRTL ? 'ملاحظة' : 'Note', message.content, 'note')}>
-                              {isRTL ? 'حفظ في الملاحظات' : 'Save to Notes'}
-                            </button>
-                          </div>
-                          <div className="text-xs text-gray-400">FIDIC AI</div>
-                        </div>}
+
+                      {/* Tool calls */}
+                      {message.toolCalls && message.toolCalls.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {message.toolCalls.map((tool, i) => (
+                            <ToolCallSection key={i} toolCall={tool} />
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Actions for assistant messages */}
+                      {message.role === 'assistant' && (
+                        <div className="mt-2 pt-2 border-t border-gray-700 flex justify-between items-center">
+                          <button
+                            className="text-xs text-gray-400 hover:text-blue-400"
+                            onClick={() => handleCopy(message.content)}
+                          >
+                            <CopyIcon size={12} className="inline mr-1" />
+                            {isRTL ? 'نسخ' : 'Copy'}
+                          </button>
+                          <span className="text-xs text-gray-500">FIDIC AI</span>
+                        </div>
+                      )}
                     </div>
-                  </div>)}
+                  </div>
+                ))}
+
+                {/* Typing indicator */}
+                {isTyping && (
+                  <div className="flex items-center space-x-2 mb-3">
+                    <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 shadow-sm">
+                      <div className="flex items-center space-x-1.5">
+                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" />
+                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }} />
+                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }} />
+                        <span className="text-xs text-gray-400 ml-2">
+                          {isRTL ? 'يفكر...' : 'Thinking...'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div ref={messagesEndRef} />
               </div>
+
               {/* Input */}
-              <div className="p-3 border-t border-gray-200">
+              <div className="p-3 border-t border-gray-700 bg-gray-800">
                 <div className="relative">
-                  <textarea value={inputValue} onChange={e => setInputValue(e.target.value)} onKeyPress={handleKeyPress} placeholder={isRTL ? 'اكتب سؤالك هنا...' : 'Type your question here...'} className="w-full pl-3 pr-10 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none" rows={2} />
-                  <button onClick={handleSendMessage} disabled={inputValue.trim() === ''} className={`absolute right-2 bottom-2 text-blue-600 hover:text-blue-800 ${inputValue.trim() === '' ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                  <textarea
+                    value={inputValue}
+                    onChange={(e) => setInputValue(e.target.value)}
+                    onKeyDown={handleKeyPress}
+                    placeholder={isRTL ? 'اكتب سؤالك هنا...' : 'Type your question here...'}
+                    className="w-full pl-3 pr-10 py-2 border border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none bg-gray-700 text-white placeholder-gray-400"
+                    rows={2}
+                  />
+                  <button
+                    onClick={handleSendMessage}
+                    disabled={inputValue.trim() === '' || isTyping}
+                    className={`absolute right-2 bottom-2 text-blue-400 hover:text-blue-300 ${
+                      inputValue.trim() === '' || isTyping ? 'opacity-50 cursor-not-allowed' : ''
+                    }`}
+                  >
                     <SendIcon size={20} />
                   </button>
                 </div>
-                <div className="flex justify-between mt-2 text-xs text-gray-500">
+                <div className="flex justify-between mt-2 text-xs text-gray-400">
                   <span>
-                    {isRTL ? 'يمكنك طرح أسئلة حول العقود والبنود والالتزامات' : 'Ask questions about contracts, clauses, and obligations'}
+                    {isRTL ? 'اسأل عن العقود والبنود والالتزامات' : 'Ask about contracts, clauses, and obligations'}
                   </span>
-                  <button className="text-blue-600 hover:text-blue-800">
-                    <SettingsIcon size={14} className="inline mr-1" />
-                    {isRTL ? 'إعدادات' : 'Settings'}
+                  <button
+                    onClick={handleClearConversation}
+                    className="text-gray-400 hover:text-blue-400 flex items-center"
+                    title={isRTL ? 'مسح المحادثة' : 'Clear conversation'}
+                  >
+                    <RefreshCwIcon size={14} className="mr-1" />
+                    {isRTL ? 'مسح' : 'Clear'}
                   </button>
                 </div>
               </div>
-            </>}
+            </>
+          )}
         </div>
-      ))}
-    </>;
+      )}
+    </>
+  );
+}
+
+function ToolCallSection({ toolCall }: { toolCall: ToolCall }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="border border-gray-600 rounded text-xs">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1 w-full px-2 py-1 text-left text-gray-300 hover:bg-gray-700 rounded"
+      >
+        <WrenchIcon size={12} />
+        <span className="font-medium">{toolCall.name}</span>
+        {expanded ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
+      </button>
+      {expanded && (
+        <div className="px-2 py-1 border-t border-gray-600 bg-gray-900 max-h-32 overflow-y-auto">
+          <pre className="whitespace-pre-wrap text-gray-400">
+            {JSON.stringify(toolCall.result ?? toolCall.arguments, null, 2)}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
 }
